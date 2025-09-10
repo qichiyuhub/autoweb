@@ -20,6 +20,7 @@ readonly REPO_BASE_URL="https://raw.githubusercontent.com/qichiyuhub/autoweb/ref
 readonly SCRIPT_BASE_URL="${REPO_BASE_URL}/script"
 readonly SCRIPT_LIST_URL="${SCRIPT_BASE_URL}/script_list.txt"
 readonly LOG_FILE="/var/log/autoweb/installer.log"
+readonly MENU_COMMAND="am"  # 可自定义的菜单调出命令
 
 # 终端颜色定义
 readonly GREEN='\033[0;32m'
@@ -131,8 +132,9 @@ run_initialization() {
     ln -sfn /var/backups/autoweb "${CORE_DIR}/backups" 2>/dev/null || echo "警告: 无法创建 backups 符号链接。" >&2
     ln -sf /etc/caddy/Caddyfile "${CONFIG_DIR}/Caddyfile" 2>/dev/null || echo "警告: 无法创建 Caddyfile 符号链接。" >&2
 
-    printf '%s\n' '#!/bin/bash' 'exec /bin/bash /opt/autoweb/script/menu.sh "$@"' > /usr/local/bin/wp
-    chmod +x /usr/local/bin/wp
+    # 使用变量创建菜单命令
+    printf '%s\n' '#!/bin/bash' 'exec /bin/bash /opt/autoweb/script/menu.sh "$@"' > "/usr/local/bin/${MENU_COMMAND}"
+    chmod +x "/usr/local/bin/${MENU_COMMAND}"
 
     touch "${CORE_DIR}/.initialized"
 }
