@@ -9,7 +9,7 @@
 #  特性:
 #  - 仪表盘式主菜单，实时显示系统状态。
 #  - 纯数字菜单，统一交互逻辑。
-#  - 全生命周期容器管理 (启/停/重启/日志/终端/删除)。
+#  - 全生命周期容器管理 (启/停/重启/日志/终端/删除/开机自启)。
 #  - 完整的 Compose 项目工作流 (创建/管理/删除)。
 #  - 完整的镜像和网络管理模块。
 # ==============================================================================
@@ -93,6 +93,75 @@ run_podman_command() {
     fi
 }
 
+# 检查是否以 root 身份运行
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log "RED" "错误: 此操作需要 root 权限。请使用 'sudo' 运行此脚本。"
+        return 1
+    fi
+    return 0
+}
+
+# 统一管理 systemd 服务 (开机自启)
+manage_systemd_service() {
+    local container_name="$1" action="$2"
+    if [ -z "$container_name" ]; then log "RED" "内部错误: 未提供容器名称。"; return 1; fi
+
+    local service_name="container-${container_name}.service"
+    local service_file="/etc/systemd/system/${service_name}"
+
+    case "$action" in
+        enable)
+            if ! check_root; then return 1; fi
+            log "YELLOW" "正在为容器 '${container_name}' 生成 systemd 服务..."
+            # 隐藏不必要的命令输出
+            if ! podman generate systemd --name "$container_name" --files --restart-policy=always --container-prefix=container >/dev/null 2>&1; then
+                log "RED" "生成 systemd 文件失败。"
+                return 1
+            fi
+            
+            log "YELLOW" "移动服务文件到 ${service_file}..."
+            if ! mv -f "./${service_name}" "${service_file}"; then
+                 log "RED" "移动文件失败，请检查权限。"
+                 rm -f "./${service_name}" # 清理生成的垃圾文件
+                 return 1
+            fi
+
+            log "YELLOW" "重新加载 systemd 并启用服务..."
+            systemctl daemon-reload
+            # 隐藏不必要的命令输出
+            systemctl enable --now "${service_name}" >/dev/null 2>&1
+            log "GREEN" "容器 '${container_name}' 的开机自启动已成功启用！"
+            ;;
+        disable)
+            if ! check_root; then return 1; fi
+            if [ ! -f "$service_file" ]; then
+                # 如果文件不存在，也算作“禁用成功”
+                return 0
+            fi
+            log "YELLOW" "正在停止并禁用 systemd 服务 '${service_name}'..."
+            systemctl disable --now "${service_name}" >/dev/null 2>&1 || true
+            
+            log "YELLOW" "正在删除服务文件 ${service_file}..."
+            rm -f "${service_file}"
+            systemctl daemon-reload >/dev/null 2>&1
+            log "GREEN" "容器 '${container_name}' 的开机自启动已禁用。"
+            ;;
+        status_text)
+            local service_name_no_prefix="container-${container_name}.service"
+            if systemctl is-enabled "${service_name_no_prefix}" &>/dev/null; then
+                echo -e "${C_GREEN}✔ 已启用${C_RESET}"
+            else
+                echo -e "${C_GRAY}✘ 已禁用${C_RESET}"
+            fi
+            ;;
+        *)
+            log "RED" "未知的 systemd 操作: $action"
+            return 1
+            ;;
+    esac
+}
+
 # ==============================================================================
 #  1. 容器管理 (Container Management)
 # ==============================================================================
@@ -104,8 +173,8 @@ container_menu() {
         local containers=()
         mapfile -t containers < <(podman ps -a --format "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}" --no-trunc)
 
-        printf "  %-4s %-15s %-25s %-30s %s\n" "编号" "ID" "NAMES" "IMAGE" "STATUS"
-        echo "----------------------------------------------------------------------------------------------------------"
+        printf "  %-4s %-15s %-25s %-30s %-22s %s\n" "编号" "ID" "NAMES" "IMAGE" "STATUS" "开机自启"
+        echo "----------------------------------------------------------------------------------------------------------------------"
         if [ ${#containers[@]} -eq 0 ]; then
             log "YELLOW" "  没有找到任何容器。"
         else
@@ -115,20 +184,22 @@ container_menu() {
                 if [[ "$status" =~ ^Up ]]; then color="$C_GREEN"
                 elif [[ "$status" =~ ^Exited ]]; then color="$C_YELLOW"
                 fi
-                printf "  [%-2d] %-15.12s ${C_CYAN}%-25s${C_RESET} %-30s ${color}%s${C_RESET}\n" "$((i+1))" "$id" "$names" "$image" "$status"
+                local autostart_status
+                autostart_status=$(manage_systemd_service "$names" "status_text")
+                printf "  [%-2d] %-15.12s ${C_CYAN}%-25s${C_RESET} %-30s ${color}%-22s${C_RESET} %s\n" "$((i+1))" "$id" "$names" "$image" "$status" "$autostart_status"
             done
         fi
-        echo "----------------------------------------------------------------------------------------------------------"
+        echo "----------------------------------------------------------------------------------------------------------------------"
 
         log "YELLOW" "\n请选择操作:"
         echo "  [1] 启动    [2] 停止    [3] 重启    [4] 日志"
-        echo "  [5] 终端    [6] 详情    [7] 删除"
+        echo "  [5] 终端    [6] 详情    [7] 删除    [8] 开机自启"
         echo "  [0] 返回主菜单"
         read -r -p "输入选项: " sub_choice
 
         case "$sub_choice" in
             0) return ;;
-            [1-7]) 
+            [1-8]) 
                 if [ ${#containers[@]} -eq 0 ]; then
                     log "YELLOW" "没有可操作的容器。"
                 else
@@ -147,7 +218,30 @@ container_menu() {
                             4) clear; log "CYAN" "查看容器 ${names} 日志 (按 Ctrl+C 退出)..."; podman logs -f "$id" || true;;
                             5) clear; log "CYAN" "正进入容器 ${names} (输入 'exit' 退出)..."; if ! podman exec -it "$id" /bin/bash 2>/dev/null; then podman exec -it "$id" /bin/sh; fi;;
                             6) clear; log "CYAN" "容器 ${names} (${id:0:12}) 详细信息:"; if command -v jq &> /dev/null; then podman inspect "$id" | jq; else podman inspect "$id"; fi;;
-                            7) if confirm "确定要强制删除容器 ${names} (${id:0:12}) 吗?"; then run_podman_command rm -f "$id"; fi;;
+                            7) 
+                                if confirm "确定要强制删除容器 ${names} (${id:0:12}) 吗?"; then
+                                    # 删除容器前，先禁用并清理其 systemd 服务
+                                    log "YELLOW" "正在检查并清理相关的开机自启服务..."
+                                    if manage_systemd_service "$names" "disable"; then
+                                        run_podman_command rm -f "$id"
+                                    else
+                                        log "RED" "清理自启服务失败，删除操作中止。"
+                                    fi
+                                fi
+                                ;;
+                            8) 
+                                local current_status_raw
+                                current_status_raw=$(systemctl is-enabled "container-${names}.service" 2>/dev/null || echo "disabled")
+                                if [[ "$current_status_raw" == "enabled" ]]; then
+                                    if confirm "开机自启已启用。要禁用 '${names}' 的开机自启吗?"; then
+                                        manage_systemd_service "$names" "disable"
+                                    fi
+                                else
+                                    if confirm "开机自启已禁用。要启用 '${names}' 的开机自启吗?"; then
+                                        manage_systemd_service "$names" "enable"
+                                    fi
+                                fi
+                                ;;
                         esac
                     else
                         log "RED" "无效的编号。"
@@ -303,6 +397,35 @@ network_menu() {
 #  4. Compose 项目管理 (Compose Project Management)
 # ==============================================================================
 
+_manage_compose_autostart() {
+    local project_name="$1"
+    local project_dir="${COMPOSE_BASE_DIR}/${project_name}"
+    
+    local container_names=()
+    mapfile -t container_names < <(cd "$project_dir" && podman-compose ps -q | xargs -r podman inspect --format '{{.Name}}' | sed 's|^/||')
+    
+    if [ ${#container_names[@]} -eq 0 ]; then
+        log "YELLOW" "项目 '${project_name}' 中没有找到可操作的容器。"
+        return
+    fi
+    
+    log "CYAN" "将为项目 '${project_name}' 下的以下容器设置开机自启:"
+    for container_name in "${container_names[@]}"; do
+        echo " - $container_name"
+    done
+
+    if confirm "您确定要为以上所有容器启用开机自启吗?"; then
+        for container_name in "${container_names[@]}"; do
+            manage_systemd_service "$container_name" "enable"
+            if [ $? -ne 0 ]; then
+                log "RED" "在为 ${container_name} 启用自启时发生错误，操作中止。"
+                return 1
+            fi
+        done
+        log "GREEN" "项目 '${project_name}' 的所有容器均已启用开机自启。"
+    fi
+}
+
 _add_compose_project() {
     log "CYAN" "--- 添加新的 Compose 项目 ---"
     read -r -p "请输入新项目的名称 (例如: my-app): " project_name
@@ -331,8 +454,12 @@ _add_compose_project() {
     
     if confirm "内容确认无误，是否立即启动 (up -d)?"; then
         log "CYAN" "在 '${project_dir}' 中执行 'podman-compose up -d'..."
-        (cd "$project_dir" && podman-compose up -d)
-        log "GREEN" "项目 '$project_name' 已成功启动！"
+        if (cd "$project_dir" && podman-compose up -d); then
+            log "GREEN" "项目 '$project_name' 已成功启动！"
+            _manage_compose_autostart "$project_name"
+        else
+            log "RED" "项目启动失败。"
+        fi
     else
         log "YELLOW" "项目已创建但未启动。"
     fi
@@ -352,6 +479,7 @@ _manage_single_compose_project() {
         
         log "YELLOW" "\n请选择操作:"
         echo "  [1] 启动/更新    [2] 停止并移除    [3] 查看日志    [4] 重启"
+        echo "  [5] 设置开机自启"
         echo "  [0] 返回项目列表"
         read -r -p "输入选项: " sub_choice
         
@@ -365,6 +493,7 @@ _manage_single_compose_project() {
                fi;;
             3) clear; log "CYAN" "查看项目日志 (Ctrl+C 退出)..."; (cd "$project_dir" && podman-compose logs -f || true);;
             4) (cd "$project_dir" && podman-compose restart);;
+            5) _manage_compose_autostart "$project_name";;
             *) log "RED" "无效输入。";;
         esac
         press_any_key_to_continue
@@ -515,6 +644,17 @@ add_run_container() {
         log "CYAN" "所有宿主机目录已就绪，正在执行 Podman 命令..."
         if eval "$run_command"; then
             log "GREEN" "命令执行成功！"
+            local container_name
+            container_name=$(echo "$single_line_command" | grep -oP '(--name\s*=?\s*)\K[^\s]+' | head -n 1)
+            
+            if [ -n "$container_name" ]; then
+                if confirm "是否为新容器 '${container_name}' 启用开机自启动?"; then
+                    manage_systemd_service "$container_name" "enable"
+                fi
+            else
+                log "YELLOW" "警告: 未在命令中找到 '--name' 参数，无法自动设置开机自启。"
+                log "YELLOW" "您可以在 '容器管理' 菜单中手动为该容器启用自启。"
+            fi
         else
             log "RED" "命令执行失败，请检查上面的错误信息。"
         fi
