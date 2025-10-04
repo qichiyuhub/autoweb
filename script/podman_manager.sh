@@ -12,12 +12,14 @@
 #  - 全生命周期容器管理 (启/停/重启/日志/终端/删除/开机自启)。
 #  - 完整的 Compose 项目工作流 (创建/管理/删除)。
 #  - 完整的镜像和网络管理模块。
+#  - 全局自动更新服务的状态管理，需要创建容器是添加更新标签 --label "io.containers.autoupdate=registry"
 # ==============================================================================
 set -Eeuo pipefail
 
 # --- 全局常量与配置 ---
 readonly COMPOSE_BASE_DIR="/opt/podman-compose"
 readonly COMPOSE_FILE_NAME="docker-compose.yml"
+readonly RUN_HISTORY_FILE="/opt/autoweb/podman_run_history.conf"
 
 # --- 颜色定义 ---
 readonly C_RESET='\033[0m'
@@ -113,9 +115,8 @@ manage_systemd_service() {
     case "$action" in
         enable)
             if ! check_root; then return 1; fi
-            log "YELLOW" "正在为容器 '${container_name}' 生成 systemd 服务..."
-            # 隐藏不必要的命令输出
-            if ! podman generate systemd --name "$container_name" --files --restart-policy=always --container-prefix=container >/dev/null 2>&1; then
+            log "YELLOW" "正在为容器 '${container_name}' 生成最新的 systemd 服务文件..."
+            if ! podman generate systemd --name "$container_name" --files --new --restart-policy=always --container-prefix=container >/dev/null 2>&1; then
                 log "RED" "生成 systemd 文件失败。"
                 return 1
             fi
@@ -129,30 +130,14 @@ manage_systemd_service() {
 
             log "YELLOW" "重新加载 systemd 并启用服务..."
             systemctl daemon-reload
-            # 隐藏不必要的命令输出
             systemctl enable --now "${service_name}" >/dev/null 2>&1
             log "GREEN" "容器 '${container_name}' 的开机自启动已成功启用！"
             ;;
-        disable)
-            if ! check_root; then return 1; fi
-            if [ ! -f "$service_file" ]; then
-                # 如果文件不存在，也算作“禁用成功”
-                return 0
-            fi
-            log "YELLOW" "正在停止并禁用 systemd 服务 '${service_name}'..."
-            systemctl disable --now "${service_name}" >/dev/null 2>&1 || true
-            
-            log "YELLOW" "正在删除服务文件 ${service_file}..."
-            rm -f "${service_file}"
-            systemctl daemon-reload >/dev/null 2>&1
-            log "GREEN" "容器 '${container_name}' 的开机自启动已禁用。"
-            ;;
         status_text)
-            local service_name_no_prefix="container-${container_name}.service"
-            if systemctl is-enabled "${service_name_no_prefix}" &>/dev/null; then
+            if systemctl is-enabled "container-${container_name}.service" &>/dev/null; then
                 echo -e "${C_GREEN}✔ 已启用${C_RESET}"
             else
-                echo -e "${C_GRAY}✘ 已禁用${C_RESET}"
+                echo -e "${C_GRAY}✘ 未启用${C_RESET}" 
             fi
             ;;
         *)
@@ -219,25 +204,33 @@ container_menu() {
                             5) clear; log "CYAN" "正进入容器 ${names} (输入 'exit' 退出)..."; if ! podman exec -it "$id" /bin/bash 2>/dev/null; then podman exec -it "$id" /bin/sh; fi;;
                             6) clear; log "CYAN" "容器 ${names} (${id:0:12}) 详细信息:"; if command -v jq &> /dev/null; then podman inspect "$id" | jq; else podman inspect "$id"; fi;;
                             7) 
-                                if confirm "确定要强制删除容器 ${names} (${id:0:12}) 吗?"; then
-                                    # 删除容器前，先禁用并清理其 systemd 服务
-                                    log "YELLOW" "正在检查并清理相关的开机自启服务..."
-                                    if manage_systemd_service "$names" "disable"; then
-                                        run_podman_command rm -f "$id"
+                                if confirm "警告：此操作将永久删除容器 ${names} 及其所有数据！确定吗？"; then
+                                    
+                                    local service_name="container-${names}.service"
+                                    local service_file="/etc/systemd/system/${service_name}"
+                                    
+                                    log "YELLOW" "正在检查并彻底清理相关的开机自启服务..."
+                                    systemctl disable --now "${service_name}" >/dev/null 2>&1 || true
+                                    if [ -f "$service_file" ]; then
+                                        log "YELLOW" "正在删除服务文件 ${service_file}..."
+                                        rm -f "${service_file}"
+                                        systemctl daemon-reload >/dev/null 2>&1
+                                    fi
+                                    
+                                    log "YELLOW" "服务清理完成，正在删除容器 '${names}'..."
+                                    if run_podman_command rm -f "$id"; then
+                                        log "GREEN" "容器 '${names}' 及相关服务已成功删除。"
                                     else
-                                        log "RED" "清理自启服务失败，删除操作中止。"
+                                        log "RED" "删除容器 '${names}' 失败，请手动检查。"
                                     fi
                                 fi
                                 ;;
                             8) 
-                                local current_status_raw
-                                current_status_raw=$(systemctl is-enabled "container-${names}.service" 2>/dev/null || echo "disabled")
-                                if [[ "$current_status_raw" == "enabled" ]]; then
-                                    if confirm "开机自启已启用。要禁用 '${names}' 的开机自启吗?"; then
-                                        manage_systemd_service "$names" "disable"
-                                    fi
+                                local service_name="container-${names}.service"
+                                if systemctl is-enabled "${service_name}" &>/dev/null; then
+                                    log "GREEN" "容器 '${names}' 的开机自启已经启用，无需操作。"
                                 else
-                                    if confirm "开机自启已禁用。要启用 '${names}' 的开机自启吗?"; then
+                                    if confirm "要为容器 '${names}' 启用开机自启吗？"; then
                                         manage_systemd_service "$names" "enable"
                                     fi
                                 fi
@@ -417,6 +410,7 @@ _manage_compose_autostart() {
     if confirm "您确定要为以上所有容器启用开机自启吗?"; then
         for container_name in "${container_names[@]}"; do
             manage_systemd_service "$container_name" "enable"
+            # shellcheck disable=SC2181
             if [ $? -ne 0 ]; then
                 log "RED" "在为 ${container_name} 启用自启时发生错误，操作中止。"
                 return 1
@@ -644,6 +638,16 @@ add_run_container() {
         log "CYAN" "所有宿主机目录已就绪，正在执行 Podman 命令..."
         if eval "$run_command"; then
             log "GREEN" "命令执行成功！"
+            log "CYAN" "正在将命令记录到 ${RUN_HISTORY_FILE} 文件中..."
+            {
+                echo "======================================================================"
+                echo "执行时间: $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "执行的原始命令:"
+                echo "${run_command}"
+                echo "======================================================================"
+                echo ""
+            } >> "$RUN_HISTORY_FILE"
+
             local container_name
             container_name=$(echo "$single_line_command" | grep -oP '(--name\s*=?\s*)\K[^\s]+' | head -n 1)
             
@@ -678,6 +682,82 @@ prune_system() {
 }
 
 # ==============================================================================
+#  7. 管理全局自动更新服务
+# ==============================================================================
+manage_global_autoupdate_menu() {
+    if ! check_root; then return 1; fi
+    
+    while true; do
+        clear
+        log "CYAN" "--- 7. 管理全局自动更新服务 ---"
+        log "YELLOW" "此服务会定时检查所有带\"更新标签\"的容器，并自动拉取新镜像、重建容器。"
+        
+        local timer_status_active timer_status_enabled status_color
+        if systemctl is-active --quiet podman-auto-update.timer; then
+            timer_status_active="活动 (Active)"
+            status_color="$C_GREEN"
+        else
+            timer_status_active="非活动 (Inactive)"
+            status_color="$C_RED"
+        fi
+        
+        if systemctl is-enabled --quiet podman-auto-update.timer 2>/dev/null; then
+            timer_status_enabled="已启用 (Enabled)"
+        else
+            timer_status_enabled="已禁用 (Disabled)"
+        fi
+        
+        echo -e "\n当前状态: ${status_color}${timer_status_active}${C_RESET} | ${timer_status_enabled}"
+
+        log "YELLOW" "\n请选择操作:"
+        echo "  [1] 启用并立即启动"
+        echo "  [2] 禁用并立即停止"
+        echo "  [3] 查看最近一次更新记录"
+        echo "  [4] 手动立即触发一次更新"
+        echo "  [0] 返回主菜单"
+        read -r -p "输入选项: " choice
+
+        case "$choice" in
+            1)
+                log "YELLOW" "正在启用并启动 'podman-auto-update.timer'..."
+                systemctl enable --now podman-auto-update.timer
+                log "GREEN" "服务已启用并启动！"
+                press_any_key_to_continue
+                ;;
+            2)
+                log "YELLOW" "正在禁用并停止 'podman-auto-update.timer'..."
+                systemctl disable --now podman-auto-update.timer
+                log "GREEN" "服务已禁用并停止。"
+                press_any_key_to_continue
+                ;;
+            3)
+                clear
+                log "CYAN" "--- 最近一次 Podman Auto-Update 执行记录 ---"
+                journalctl -u podman-auto-update.service -n 50 --no-pager
+                press_any_key_to_continue
+                ;;
+            4)
+                clear
+                log "CYAN" "--- 手动触发 Podman Auto-Update ---"
+                if ! podman auto-update; then
+                    log "YELLOW" "未检测到可更新的容器（可能未添加自动更新标签）。"
+                else
+                    log "GREEN" "手动更新已完成（可通过 [3] 查看日志）。"
+                fi
+                press_any_key_to_continue
+                ;;
+            0)
+                return
+                ;;
+            *)
+                log "RED" "无效输入。"
+                press_any_key_to_continue
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
 #  主菜单与执行逻辑 (Main Menu & Logic)
 # ==============================================================================
 show_main_menu() {
@@ -698,6 +778,7 @@ show_main_menu() {
     log "CYAN"   " ------------------------------------------------------"
     log "GREEN"  " [5] 直接运行 'podman run' 命令"
     log "YELLOW" " [6] 一键清理系统 (Prune System)"
+    log "CYAN"   " [7] 管理全局自动更新服务"
     log "CYAN"   " ------------------------------------------------------"
     log "RED"    " [0] 退出脚本"
     log "CYAN"   "========================================================"
@@ -717,6 +798,7 @@ main() {
             4) compose_menu ;;
             5) add_run_container; press_any_key_to_continue ;;
             6) prune_system; press_any_key_to_continue ;;
+            7) manage_global_autoupdate_menu ;;
             0) log "CYAN" "感谢使用，再见！"; exit 0 ;;
             *) log "RED" "无效的输入，请重新选择。"; press_any_key_to_continue ;;
         esac
