@@ -12,7 +12,7 @@
 #  - 全生命周期容器管理 (启/停/重启/日志/终端/删除/开机自启)。
 #  - 完整的 Compose 项目工作流 (创建/管理/删除)。
 #  - 完整的镜像和网络管理模块。
-#  - 全局自动更新服务的状态管理，需要创建容器是添加更新标签 --label "io.containers.autoupdate=registry"
+#  - 全局自动更新服务的状态管理，需要创建容器是添加更新标签 --label "io.containers.autoupdate=registry"，并且规范命名镜像名称： docker.io/xream/sub-store:latest
 # ==============================================================================
 set -Eeuo pipefail
 
@@ -614,7 +614,8 @@ create_host_dirs_from_command() {
 # ==============================================================================
 add_run_container() {
     log "CYAN" "--- 5. 通过 'run' 命令添加新容器 ---"
-    log "YELLOW" "请将您完整的 'podman run' 命令粘贴到下方。按 Ctrl+D 结束输入。"
+    log "YELLOW" "请将您完整的 'podman run' 命令粘贴到下方，按 Ctrl+D 结束输入。"
+    log "GREEN" "注意如需容器自动更新，添加更新标签参数，镜像名字添加仓库地址以及latest版本，以及启用开启自启动，再从主脚本菜单启用自动更新即可。"
     echo -e "${C_CYAN}--- 开始粘贴 ---${C_RESET}"
     local run_command
     run_command=$(cat)
@@ -627,7 +628,7 @@ add_run_container() {
     local single_line_command
     single_line_command=$(echo -n "$run_command" | tr -s '[:space:]' ' ')
 
-    log "CYAN" "将要执行以下命令："
+    log "CYAN" "将要执行以下命令"
     log "YELLOW" "$single_line_command"
     if confirm "确认执行吗？"; then
         if ! create_host_dirs_from_command "$single_line_command"; then
@@ -739,9 +740,13 @@ manage_global_autoupdate_menu() {
             4)
                 clear
                 log "CYAN" "--- 手动触发 Podman Auto-Update ---"
-                if ! podman auto-update; then
-                    log "YELLOW" "未检测到可更新的容器（可能未添加自动更新标签）。"
+                local labeled_containers
+                labeled_containers=$(podman ps -a --filter "label=io.containers.autoupdate" --format "{{.ID}}")
+                if [[ -z "$labeled_containers" ]]; then
+                    log "YELLOW" "未检测到任何配置了 \"io.containers.autoupdate=registry\" 标签的容器。"
                 else
+                    log "CYAN" "检测到已配置更新标签的容器，正在执行更新..."
+                    podman auto-update
                     log "GREEN" "手动更新已完成（可通过 [3] 查看日志）。"
                 fi
                 press_any_key_to_continue
