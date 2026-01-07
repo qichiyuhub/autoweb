@@ -396,6 +396,7 @@ view_logs() {
 
 list_certs() {
     log "CYAN" "--- 已管理的 TLS 证书列表 ---"
+    log "YELLOW" "--- 新增域名，尝试清理所有证书，重启 ---"
 
     local cert_dir="/var/lib/caddy/.local/share/caddy/certificates"
     local found=0
@@ -455,6 +456,38 @@ list_certs() {
     fi
 }
 
+clear_certs() {
+    log "CYAN" "--- 清理所有 TLS 证书 ---"
+
+    local cert_dir="/var/lib/caddy/.local/share/caddy/certificates"
+
+    if [[ ! -d "$cert_dir" ]]; then
+        log "RED" "错误：未找到 Caddy 证书目录: ${cert_dir}"
+        return 1
+    fi
+
+    local files_count
+    files_count=$(find "$cert_dir" -type f | wc -l)
+
+    if [[ "$files_count" -eq 0 ]]; then
+        log "GREEN" "未找到证书文件，目录为空。"
+        return 0
+    fi
+
+    if ! confirm_action "确定要删除目录 ${cert_dir} 下的所有证书文件吗？此操作不可逆！"; then
+        log "CYAN" "操作已取消。"
+        return 0
+    fi
+
+    if find "$cert_dir" -type f -exec rm -f {} +; then
+        log "GREEN" "已删除 ${files_count} 个证书文件。"
+        return 0
+    else
+        log "RED" "删除证书文件时发生错误。"
+        return 1
+    fi
+}
+
 # ==============================================================================
 #  主菜单与程序入口
 # ==============================================================================
@@ -483,7 +516,8 @@ show_menu() {
     echo
     echo -e "${YELLOW} [ 状态与诊断 ]${NC}"
     echo -e "  [10] 查看服务状态     [11] 查看实时日志"
-    echo -e "  [12] 查看证书列表"
+    echo -e "  [12] 查看证书列表     [13] 清理所有证书"
+    echo
     
     echo -e "${CYAN}------------------------------------------------------------${NC}"
     echo -e "${RED}   [0] 退出脚本${NC}"
@@ -494,9 +528,9 @@ main() {
     init
     while true; do
         show_menu
-        read -rp "请输入您的选择 [0-12]: " choice
-        
-        local auto_continue_options="1 2 3 4 6 7 8 9 10 12"
+        read -rp "请输入您的选择 [0-13]: " choice
+
+        local auto_continue_options="1 2 3 4 6 7 8 9 10 12 13"
 
         clear
         case "$choice" in
@@ -506,6 +540,7 @@ main() {
             7) stop_service ;;     8) restart_service ;;
             9) reload_service ;;   10) check_status ;;
             11) view_logs ;;       12) list_certs ;;
+            13) clear_certs ;;
             0) log "GREEN" "感谢使用，脚本已退出。"; exit 0 ;;
             *) log "RED" "无效输入！"; sleep 1; continue ;;
         esac
