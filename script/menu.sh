@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # AutoWeb综合管理脚本
-# 版本: 1.1.0
+# 版本: 1.2.0
 # 功能：提供交互式菜单界面，用于执行各种 autoweb 系统的部署和管理任务。
 #
 
@@ -97,6 +97,7 @@ show_menu() {
     echo -e "${GREEN}12. 备份网站数据${NC}"
     echo -e "${GREEN}13. 恢复网站数据${NC}"
     echo -e "${GREEN}14. 更新管理脚本${NC}"
+    echo -e "${GREEN}15. UFW管理${NC}"
     
     echo -e "${CYAN}=========================================================${NC}" >&2
     echo -e "${GREEN} 0. 退出脚本${NC}"
@@ -129,6 +130,7 @@ handle_choice() {
         12) run_script "备份网站数据" "backup.sh" ;;
         13) run_script "恢复网站数据" "restore.sh" ;;
         14) run_script "更新管理脚本" "script_update.sh" ;;
+        15) run_script "UFW管理" "ufw_manager.sh" ;;
 
         # --- 退出 ---
         0) echo -e "\n${CYAN}正在退出...${NC}" >&2; exit 0 ;;
