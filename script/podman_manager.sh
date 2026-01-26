@@ -584,17 +584,20 @@ create_host_dirs_from_command() {
 
         # 只处理绝对路径
         if [[ "$host_path" == /* ]]; then
-            # 检查路径是否存在，并且不是一个已存在的文件
-            if [ -e "$host_path" ] && [ ! -d "$host_path" ]; then
-                log "RED" "错误: 路径 '$host_path' 已存在但不是一个目录。无法创建。"
-                status=1
-                break
-            fi
-
-            if [ ! -d "$host_path" ]; then
-                log "YELLOW" "目录 '$host_path' 不存在。正在自动创建..."
+            if [ -e "$host_path" ]; then
+                # 路径已存在，判断类型并给出友好提示
+                if [ -f "$host_path" ]; then
+                    log "GREEN" "✓ 文件 '$host_path' 已存在，跳过。"
+                elif [ -d "$host_path" ]; then
+                    log "GREEN" "✓ 目录 '$host_path' 已存在，跳过。"
+                else
+                    log "YELLOW" "⚠ 路径 '$host_path' 已存在但类型未知，跳过检查。"
+                fi
+            else
+                # 路径不存在，创建为目录（模拟 Docker 行为）
+                log "YELLOW" "正在创建目录 '$host_path'..."
                 if mkdir -p "$host_path"; then
-                    log "GREEN" "目录 '$host_path' 创建成功。"
+                    log "GREEN" "✓ 目录 '$host_path' 创建成功。"
                 else
                     log "RED" "错误: 无法创建目录 '$host_path'！请检查权限。"
                     status=1
